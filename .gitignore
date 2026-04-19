@@ -1,0 +1,55 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python cache / tooling
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+venv312/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Logs / temp
+*.log
+temp/
+
+# Project runtime outputs
+output/
+Wav2Lip/results/
+Wav2Lip/temp/
+
+# Input media (usually large and local)
+input/
+
+# Model artifacts (do not track)
+/models/
+/gfpgan/weights/
+/Wav2Lip/checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+

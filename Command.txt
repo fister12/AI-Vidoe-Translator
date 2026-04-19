@@ -1,0 +1,9 @@
+python main.py --input_video ".\input\my_english_video.mp4" --output_video ".\output\final_output.mp4" --checkpoint_path ".\models\wav2lip_gan.pth" --wav2lip_root ".\Wav2Lip" --audio_language en --output_language es --device auto --enhance --postprocess_denoise_strength 1.4 --postprocess_sharpen_amount 0.55 --postprocess_contrast 1.03 --postprocess_saturation 1.04 --postprocess_crf 14 --postprocess_preset slower
+
+//Minimal Command
+python main.py --input_video ".\input\my_english_video.mp4" --output_video ".\output\final_output.mp4" --checkpoint_path ".\models\wav2lip_gan.pth" --audio_language auto --output_language es
+
+//Legacy Alias Command (backward compatible)
+python main.py --input_video ".\input\my_english_video.mp4" --output_video ".\output\final_output.mp4" --checkpoint_path ".\models\wav2lip_gan.pth" --Initial_language en --target_language es
+
+add --enhance for GFPGAN post processing

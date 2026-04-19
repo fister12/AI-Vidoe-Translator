@@ -1,0 +1,22 @@
+# Processing
+numpy>=1.26.4,<2.0.0; python_version < "3.13"
+numpy>=2.0.0; python_version >= "3.13"
+librosa
+soundfile
+moviepy
+opencv-python
+tqdm
+
+# AI Models
+openai-whisper
+googletrans==4.0.0-rc1; python_version < "3.13"
+deep-translator; python_version >= "3.13"
+TTS; python_version < "3.12"
+gTTS; python_version >= "3.12"
+torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Utilities
+python-dotenv
+pydantic
+
+gfpgan
