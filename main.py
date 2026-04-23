@@ -15,9 +15,15 @@ from src.media_utils import (
 )
 from src.enhancement import enhance_faces_in_video
 from src.syncing import run_wav2lip_inference
+from src.languages import format_supported_target_languages, normalize_target_language
 from src.transcription import transcribe_english_audio
 from src.translation import translate_segments, translate_text
-from src.tts import synthesize_aligned_audio_from_segments, synthesize_spanish_audio
+from src.tts import (
+    TTSBackendError,
+    check_xtts_availability,
+    synthesize_aligned_audio_from_segments,
+    synthesize_speech,
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -39,12 +45,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--target_language",
         dest="output_language",
         default="es",
-        help="Language code for the translated output audio.",
+        help="Target language for translated text + speech (code or common name, e.g. 'fr' or 'french').",
+    )
+    parser.add_argument(
+        "--list_languages",
+        action="store_true",
+        help="Print supported target languages and exit.",
+    )
+    parser.add_argument(
+        "--translated_text_path",
+        default=None,
+        help="Optional path to save the translated output text.",
     )
     parser.add_argument(
         "--tts_model_name",
         default="tts_models/multilingual/multi-dataset/xtts_v2",
         help="Coqui XTTS model name.",
+    )
+    parser.add_argument(
+        "--tts_backend_policy",
+        choices=["strict_clone", "fallback_allowed", "fallback_only"],
+        default="strict_clone",
+        help="TTS backend policy for XTTS availability/failure handling.",
+    )
+    parser.add_argument(
+        "--xtts_healthcheck_only",
+        action="store_true",
+        help="Check XTTS availability and exit without running the full pipeline.",
     )
     parser.add_argument("--working_dir", default="temp", help="Directory for intermediate artifacts.")
     parser.add_argument(
@@ -165,19 +192,39 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    if args.list_languages:
+        print(format_supported_target_languages())
+        return 0
+
     args.audio_language = str(args.audio_language).strip().lower()
-    args.output_language = str(args.output_language).strip().lower()
+    try:
+        args.output_language = normalize_target_language(args.output_language)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if not args.audio_language:
         parser.error("--audio_language cannot be empty.")
-    if not args.output_language:
-        parser.error("--output_language cannot be empty.")
-    if args.output_language == "auto":
-        parser.error("--output_language cannot be 'auto'. Provide a target language code such as 'es'.")
 
     ensure_ffmpeg_available()
     device = resolve_runtime_device(requested_device=args.device, require_cuda=args.require_cuda)
     print(f"Using runtime device: {device}")
+    print(f"TTS backend policy: {args.tts_backend_policy}")
+
+    xtts_available, xtts_status = check_xtts_availability(
+        model_name=args.tts_model_name,
+        gpu=device == "cuda",
+    )
+    print(f"XTTS status: {xtts_status}")
+
+    if args.xtts_healthcheck_only:
+        if xtts_available:
+            print("XTTS healthcheck passed.")
+            return 0
+        if args.tts_backend_policy == "strict_clone":
+            print("XTTS healthcheck failed under strict_clone policy.")
+            return 1
+        print("XTTS healthcheck failed, but selected policy allows non-XTTS output.")
+        return 0
 
     input_video = Path(args.input_video)
     output_video = Path(args.output_video)
@@ -186,10 +233,11 @@ def main() -> int:
 
     extracted_audio_path = working_dir / "english_audio.wav"
     voice_sample_path = working_dir / "speaker_sample.wav"
-    translated_audio_raw_path = working_dir / "spanish_audio_raw.wav"
-    translated_audio_synced_path = working_dir / "spanish_audio_synced.wav"
+    translated_audio_raw_path = working_dir / "translated_audio_raw.wav"
+    translated_audio_synced_path = working_dir / "translated_audio_synced.wav"
     wav2lip_output_path = working_dir / "wav2lip_output.mp4"
     postprocessed_video_path = working_dir / "wav2lip_postprocessed.mp4"
+    translated_text_path = Path(args.translated_text_path) if args.translated_text_path else None
 
     extract_audio_from_video(input_video, extracted_audio_path)
     whisper_language = None if args.audio_language == "auto" else args.audio_language
@@ -214,6 +262,7 @@ def main() -> int:
     )
 
     used_segment_timing = False
+    translated_text_result = ""
     if args.timing_mode == "segment" and transcript_segments:
         try:
             translated_segments = translate_segments(
@@ -221,6 +270,9 @@ def main() -> int:
                 source_language=translation_source_language,
                 target_language=args.output_language,
             )
+            translated_text_result = " ".join(
+                str(segment.get("text", "")).strip() for segment in translated_segments if str(segment.get("text", "")).strip()
+            ).strip()
             synthesize_aligned_audio_from_segments(
                 segments=translated_segments,
                 speaker_wav_path=voice_sample_path,
@@ -228,6 +280,7 @@ def main() -> int:
                 model_name=args.tts_model_name,
                 language=args.output_language,
                 gpu=device == "cuda",
+                backend_policy=args.tts_backend_policy,
             )
             pad_or_trim_audio_to_video_duration(
                 video_path=input_video,
@@ -236,6 +289,8 @@ def main() -> int:
             )
             used_segment_timing = True
             print("Timing mode: segment-aligned")
+        except TTSBackendError:
+            raise
         except Exception as exc:
             print(f"Segment timing failed ({exc}); falling back to global timing.")
 
@@ -245,13 +300,15 @@ def main() -> int:
             source_language=translation_source_language,
             target_language=args.output_language,
         )
-        synthesize_spanish_audio(
+        translated_text_result = translated_text
+        synthesize_speech(
             text=translated_text,
             speaker_wav_path=voice_sample_path,
             output_audio_path=translated_audio_raw_path,
             model_name=args.tts_model_name,
             language=args.output_language,
             gpu=device == "cuda",
+            backend_policy=args.tts_backend_policy,
         )
 
         stretch_audio_to_video_duration(
@@ -260,6 +317,11 @@ def main() -> int:
             output_audio_path=translated_audio_synced_path,
         )
         print("Timing mode: global-stretch")
+
+    if translated_text_path:
+        translated_text_path.parent.mkdir(parents=True, exist_ok=True)
+        translated_text_path.write_text(translated_text_result, encoding="utf-8")
+        print(f"Translated text written to: {translated_text_path}")
 
     run_wav2lip_inference(
         checkpoint_path=args.checkpoint_path,
@@ -305,4 +367,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except TTSBackendError as exc:
+        print(f"TTS error: {exc}")
+        raise SystemExit(2)
