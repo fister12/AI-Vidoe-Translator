@@ -23,6 +23,7 @@ venv/
 env/
 ENV/
 venv312/
+venv311/
 
 # Packaging / build
 build/
@@ -53,6 +54,5 @@ input/
 *.onnx
 *.bin
 
-venv312
-venv311
+
 
