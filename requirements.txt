@@ -10,7 +10,8 @@ tqdm
 # AI Models
 openai-whisper
 googletrans==4.0.0-rc1; python_version < "3.13"
-deep-translator; python_version >= "3.13"
+deep-translator
+# Coqui TTS often requires native compilation on Windows; keep it optional there.
 TTS; python_version < "3.12"
 gTTS; python_version >= "3.12"
 torchaudio --index-url https://download.pytorch.org/whl/cu118
@@ -19,6 +20,6 @@ torchaudio --index-url https://download.pytorch.org/whl/cu118
 python-dotenv
 pydantic
 
-gfpgan
 
-gTTS; python_version >= "3.12"
+
+gfpgan

@@ -1,31 +1,76 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import platform
+import shutil
 import tempfile
-from typing import Literal
 
 import librosa
 import numpy as np
 import soundfile as sf
 
 
-TTSBackendPolicy = Literal["strict_clone", "fallback_allowed", "fallback_only"]
+class XTTSUnavailableError(RuntimeError):
+    """Raised when XTTS is requested but unavailable in the runtime."""
 
 
-class TTSBackendError(RuntimeError):
-    """Base class for expected TTS backend failures."""
+class XTTSRuntimeSynthesisError(RuntimeError):
+    """Raised when XTTS is installed but synthesis fails at runtime."""
 
 
-class XTTSUnavailableError(TTSBackendError):
-    """Raised when XTTS import/model initialization fails."""
+class GTTSError(RuntimeError):
+    """Raised when gTTS fallback synthesis fails."""
 
 
-class XTTSRuntimeSynthesisError(TTSBackendError):
-    """Raised when XTTS is available but synthesis fails."""
+_WINDOWS_DLL_HANDLES: list[object] = []
 
 
-class GTTSError(TTSBackendError):
-    """Raised when gTTS fallback is requested but unavailable/fails."""
+def _prepare_windows_dll_search_paths() -> None:
+    """Add likely FFmpeg/torch directories to Windows DLL search path."""
+
+    if platform.system().lower() != "windows":
+        return
+
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if add_dll_directory is None:
+        return
+
+    candidate_dirs: set[str] = set()
+
+    ffmpeg_env_dir = os.environ.get("TORCHCODEC_FFMPEG_DIR", "").strip()
+    if ffmpeg_env_dir:
+        candidate_dirs.add(ffmpeg_env_dir)
+
+    ffmpeg_executable = shutil.which("ffmpeg")
+    if ffmpeg_executable:
+        candidate_dirs.add(str(Path(ffmpeg_executable).parent))
+
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    for entry in path_entries:
+        entry = entry.strip().strip('"')
+        if not entry:
+            continue
+        entry_path = Path(entry)
+        if not entry_path.exists() or not entry_path.is_dir():
+            continue
+        if any(entry_path.glob("avutil-*.dll")):
+            candidate_dirs.add(str(entry_path))
+
+    try:
+        import torch
+
+        torch_lib_dir = Path(torch.__file__).resolve().parent / "lib"
+        if torch_lib_dir.exists():
+            candidate_dirs.add(str(torch_lib_dir))
+    except Exception:
+        pass
+
+    for dll_dir in sorted(candidate_dirs):
+        try:
+            _WINDOWS_DLL_HANDLES.append(add_dll_directory(dll_dir))
+        except Exception:
+            continue
 
 
 def _synthesize_with_xtts(
@@ -35,55 +80,51 @@ def _synthesize_with_xtts(
     model_name: str,
     language: str,
     gpu: bool,
-) -> Path:
+) -> None:
+    """Run Coqui XTTS voice cloning and write directly to output path."""
+
     try:
+        _prepare_windows_dll_search_paths()
         from TTS.api import TTS
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - depends on environment
+        os_hint = ""
+        if platform.system().lower() == "windows":
+            os_hint = (
+                " On Windows, installing Coqui TTS may require Microsoft Visual C++ Build Tools "
+                "(MSVC 14+). If torchcodec cannot load, install FFmpeg shared binaries and set "
+                "TORCHCODEC_FFMPEG_DIR to that bin folder."
+            )
         raise XTTSUnavailableError(
-            "XTTS cannot be imported in this environment. "
-            "Install/fix Coqui TTS dependencies or use --tts_backend_policy fallback_allowed."
+            "Coqui XTTS is not available in this environment. Install 'TTS' to enable voice cloning. "
+            f"Original import error: {exc}."
+            + os_hint
         ) from exc
 
     try:
         tts = TTS(model_name=model_name, progress_bar=True, gpu=gpu)
-    except Exception as exc:  # pragma: no cover - backend/model dependent
-        raise XTTSUnavailableError(
-            "XTTS model could not be initialized. "
-            "Check model name, Python compatibility, and runtime dependencies."
-        ) from exc
-
-    try:
         tts.tts_to_file(
             text=text,
             speaker_wav=str(speaker_wav_path),
             language=language,
             file_path=str(output_audio_path),
         )
-    except Exception as exc:  # pragma: no cover - backend/model dependent
-        raise XTTSRuntimeSynthesisError(
-            "XTTS failed during speech synthesis for the selected language/speaker sample."
-        ) from exc
-
-    return output_audio_path
+    except Exception as exc:  # pragma: no cover - depends on model/runtime
+        raise XTTSRuntimeSynthesisError(f"XTTS synthesis failed: {exc}") from exc
 
 
-def _synthesize_with_gtts(
-    text: str,
-    output_audio_path: Path,
-    language: str,
-) -> Path:
+def _synthesize_with_gtts(text: str, output_audio_path: Path, language: str) -> None:
+    """Fallback non-cloning TTS path for environments without XTTS."""
+
     try:
         from gtts import gTTS
-    except ImportError as exc:
-        raise GTTSError(
-            "gTTS fallback is not available. Install gTTS or switch to an XTTS-compatible environment."
-        ) from exc
+    except Exception as exc:  # pragma: no cover - depends on environment
+        raise GTTSError("gTTS is not installed or unavailable.") from exc
 
     temp_mp3_path = output_audio_path.with_suffix(".tmp.mp3")
     try:
         gTTS(text=text, lang=language).save(str(temp_mp3_path))
-    except Exception as exc:  # pragma: no cover - network/backend dependent
-        raise GTTSError("gTTS synthesis failed for the selected language.") from exc
+    except Exception as exc:  # pragma: no cover - depends on network/runtime
+        raise GTTSError(f"gTTS synthesis failed: {exc}") from exc
 
     try:
         try:
@@ -109,29 +150,11 @@ def _synthesize_with_gtts(
                 clip.write_audiofile(str(output_audio_path), **write_kwargs)
         finally:
             clip.close()
-    except Exception as exc:
-        raise GTTSError("gTTS audio post-processing failed while converting MP3 to WAV.") from exc
+    except Exception as exc:  # pragma: no cover - depends on codec/runtime
+        raise GTTSError(f"Failed converting gTTS output to WAV: {exc}") from exc
     finally:
         if temp_mp3_path.exists():
             temp_mp3_path.unlink()
-
-    return output_audio_path
-
-
-def check_xtts_availability(model_name: str = "tts_models/multilingual/multi-dataset/xtts_v2", gpu: bool = True) -> tuple[bool, str]:
-    """Return whether XTTS can be imported and initialized in the current environment."""
-
-    try:
-        from TTS.api import TTS
-    except Exception as exc:
-        return False, f"XTTS import failed: {exc}"
-
-    try:
-        TTS(model_name=model_name, progress_bar=False, gpu=gpu)
-    except Exception as exc:  # pragma: no cover - backend/model dependent
-        return False, f"XTTS model initialization failed: {exc}"
-
-    return True, "XTTS is available."
 
 
 def synthesize_speech(
@@ -141,14 +164,14 @@ def synthesize_speech(
     model_name: str = "tts_models/multilingual/multi-dataset/xtts_v2",
     language: str = "es",
     gpu: bool = True,
-    backend_policy: TTSBackendPolicy = "strict_clone",
+    backend_policy: str = "strict_clone",
 ) -> Path:
-    """Generate speech with XTTS v2 voice cloning.
+    """Synthesize speech with policy-controlled backends.
 
-    Backend policy options:
-    - strict_clone: fail if XTTS is unavailable/fails.
-    - fallback_allowed: use XTTS first, then gTTS fallback if XTTS fails.
-    - fallback_only: skip XTTS and always use gTTS.
+    backend_policy options:
+    - strict_clone: require XTTS voice cloning, fail if unavailable.
+    - fallback_allowed: prefer XTTS, fall back to gTTS if XTTS fails.
+    - fallback_only: skip XTTS and use gTTS directly.
     """
 
     text = text.strip()
@@ -162,15 +185,18 @@ def synthesize_speech(
     if not speaker_wav_path.exists():
         raise FileNotFoundError(f"Speaker reference audio not found: {speaker_wav_path}")
 
-    if backend_policy not in {"strict_clone", "fallback_allowed", "fallback_only"}:
-        raise ValueError(f"Unsupported TTS backend policy: {backend_policy}")
+    normalized_policy = backend_policy.strip().lower()
+    if normalized_policy not in {"strict_clone", "fallback_allowed", "fallback_only"}:
+        raise ValueError(
+            f"Invalid backend_policy '{backend_policy}'. Use one of: strict_clone, fallback_allowed, fallback_only."
+        )
 
-    if backend_policy == "fallback_only":
-        print("TTS backend policy=fallback_only: using gTTS (speaker cloning disabled).")
-        return _synthesize_with_gtts(text=text, output_audio_path=output_audio_path, language=language)
+    if normalized_policy == "fallback_only":
+        _synthesize_with_gtts(text=text, output_audio_path=output_audio_path, language=language)
+        return output_audio_path
 
     try:
-        return _synthesize_with_xtts(
+        _synthesize_with_xtts(
             text=text,
             speaker_wav_path=speaker_wav_path,
             output_audio_path=output_audio_path,
@@ -178,18 +204,13 @@ def synthesize_speech(
             language=language,
             gpu=gpu,
         )
-    except TTSBackendError as exc:
-        if backend_policy == "strict_clone":
-            raise XTTSUnavailableError(
-                "Speaker cloning is required, but XTTS is unavailable or failed. "
-                "Install/fix Coqui XTTS, or rerun with --tts_backend_policy fallback_allowed."
-            ) from exc
+        return output_audio_path
+    except (XTTSUnavailableError, XTTSRuntimeSynthesisError):
+        if normalized_policy == "strict_clone":
+            raise
 
-        print(
-            "Warning: XTTS cloning unavailable; falling back to gTTS. "
-            "Output speech will not match the original speaker voice."
-        )
-        return _synthesize_with_gtts(text=text, output_audio_path=output_audio_path, language=language)
+    _synthesize_with_gtts(text=text, output_audio_path=output_audio_path, language=language)
+    return output_audio_path
 
 
 def synthesize_spanish_audio(
@@ -200,7 +221,7 @@ def synthesize_spanish_audio(
     language: str = "es",
     gpu: bool = True,
 ) -> Path:
-    """Backwards-compatible wrapper for the previous function name."""
+    """Compatibility wrapper for old call sites; now policy-driven via synthesize_speech."""
 
     return synthesize_speech(
         text=text,
@@ -209,6 +230,7 @@ def synthesize_spanish_audio(
         model_name=model_name,
         language=language,
         gpu=gpu,
+        backend_policy="strict_clone",
     )
 
 
@@ -219,7 +241,7 @@ def synthesize_aligned_audio_from_segments(
     model_name: str = "tts_models/multilingual/multi-dataset/xtts_v2",
     language: str = "es",
     gpu: bool = True,
-    backend_policy: TTSBackendPolicy = "strict_clone",
+    backend_policy: str = "strict_clone",
     sample_rate: int = 22050,
     max_stretch_ratio: float = 1.35,
 ) -> Path:

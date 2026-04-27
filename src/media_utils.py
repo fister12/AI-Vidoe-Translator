@@ -105,6 +105,12 @@ def extract_audio_from_video(video_path: str | Path, output_audio_path: str | Pa
     output_audio_path = Path(output_audio_path)
     output_audio_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if not video_path.exists():
+        raise FileNotFoundError(
+            f"Input video not found: {video_path}. "
+            "Pass a valid path via --input_video (relative to current working directory or absolute)."
+        )
+
     clip = VideoFileClip(str(video_path))
     try:
         if clip.audio is None:
