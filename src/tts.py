@@ -26,6 +26,29 @@ class GTTSError(RuntimeError):
 _WINDOWS_DLL_HANDLES: list[object] = []
 
 
+# ---------------------------------------------------------------------------
+# XTTS model cache — avoids reloading the ~1.8 GB model on every call.
+# The model is loaded once on first use and reused for all subsequent
+# synthesize_speech / synthesize_aligned_audio_from_segments calls.
+# ---------------------------------------------------------------------------
+
+class _CachedXTTSModel:
+    """Lightweight container for a loaded TTS model and its configuration key."""
+
+    __slots__ = ("model", "model_name", "gpu")
+
+    def __init__(self, model: object, model_name: str, gpu: bool) -> None:
+        self.model = model
+        self.model_name = model_name
+        self.gpu = gpu
+
+    def matches(self, model_name: str, gpu: bool) -> bool:
+        return self.model_name == model_name and self.gpu == gpu
+
+
+_xtts_model_cache: _CachedXTTSModel | None = None
+
+
 def _prepare_windows_dll_search_paths() -> None:
     """Add likely FFmpeg/torch directories to Windows DLL search path."""
 
@@ -73,15 +96,16 @@ def _prepare_windows_dll_search_paths() -> None:
             continue
 
 
-def _synthesize_with_xtts(
-    text: str,
-    speaker_wav_path: Path,
-    output_audio_path: Path,
-    model_name: str,
-    language: str,
-    gpu: bool,
-) -> None:
-    """Run Coqui XTTS voice cloning and write directly to output path."""
+def _get_or_load_xtts_model(model_name: str, gpu: bool) -> object:
+    """Return a cached TTS model, loading it only if the cache is empty or stale.
+
+    This avoids reloading the ~1.8 GB XTTS model for every segment in
+    segment-aligned mode — typically saving 5-10 seconds per segment.
+    """
+    global _xtts_model_cache  # noqa: PLW0603
+
+    if _xtts_model_cache is not None and _xtts_model_cache.matches(model_name, gpu):
+        return _xtts_model_cache.model
 
     try:
         _prepare_windows_dll_search_paths()
@@ -101,7 +125,33 @@ def _synthesize_with_xtts(
         ) from exc
 
     try:
+        print(f"  Loading XTTS model '{model_name}' (this only happens once) ...")
         tts = TTS(model_name=model_name, progress_bar=True, gpu=gpu)
+    except Exception as exc:  # pragma: no cover - depends on model/runtime
+        raise XTTSUnavailableError(
+            f"Failed to load XTTS model '{model_name}': {exc}"
+        ) from exc
+
+    _xtts_model_cache = _CachedXTTSModel(model=tts, model_name=model_name, gpu=gpu)
+    return tts
+
+
+def _synthesize_with_xtts(
+    text: str,
+    speaker_wav_path: Path,
+    output_audio_path: Path,
+    model_name: str,
+    language: str,
+    gpu: bool,
+) -> None:
+    """Run Coqui XTTS voice cloning and write directly to output path.
+
+    The underlying TTS model is cached at module level so that repeated
+    calls (e.g. one per segment) reuse the same loaded weights.
+    """
+    tts = _get_or_load_xtts_model(model_name, gpu)
+
+    try:
         tts.tts_to_file(
             text=text,
             speaker_wav=str(speaker_wav_path),
@@ -252,9 +302,17 @@ def synthesize_aligned_audio_from_segments(
         text = str(segment.get("text", "")).strip()
         start = float(segment.get("start", 0.0))
         end = float(segment.get("end", start))
+        reference_audio_path = segment.get("speaker_wav_path") or segment.get("reference_audio_path")
         if not text or end <= start:
             continue
-        cleaned_segments.append({"start": start, "end": end, "text": text})
+        cleaned_segments.append(
+            {
+                "start": start,
+                "end": end,
+                "text": text,
+                "speaker_wav_path": Path(reference_audio_path) if reference_audio_path else Path(speaker_wav_path),
+            }
+        )
 
     if not cleaned_segments:
         raise ValueError("No valid timed segments were provided for aligned TTS synthesis.")
@@ -272,7 +330,7 @@ def synthesize_aligned_audio_from_segments(
             temp_segment_path = temp_dir_path / f"segment_{index:04d}.wav"
             synthesize_speech(
                 text=segment["text"],
-                speaker_wav_path=speaker_wav_path,
+                speaker_wav_path=segment["speaker_wav_path"],
                 output_audio_path=temp_segment_path,
                 model_name=model_name,
                 language=language,

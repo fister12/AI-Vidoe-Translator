@@ -152,6 +152,50 @@ def extract_voice_sample(audio_path: str | Path, output_sample_path: str | Path,
     return output_sample_path
 
 
+def extract_audio_segment(
+    audio_path: str | Path,
+    output_segment_path: str | Path,
+    start_seconds: float,
+    end_seconds: float,
+) -> Path:
+    """Extract a time slice from audio and write it as a WAV file."""
+
+    audio_path = Path(audio_path)
+    output_segment_path = Path(output_segment_path)
+    output_segment_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not audio_path.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    if end_seconds <= start_seconds:
+        raise ValueError(f"Invalid audio segment bounds: start={start_seconds}, end={end_seconds}")
+
+    waveform, sample_rate = librosa.load(str(audio_path), sr=None, mono=True)
+    if waveform.size == 0:
+        raise RuntimeError(f"Unable to extract an audio segment from empty audio: {audio_path}")
+
+    start_index = max(0, int(round(start_seconds * sample_rate)))
+    end_index = min(waveform.shape[0], int(round(end_seconds * sample_rate)))
+    if end_index <= start_index:
+        raise RuntimeError(
+            f"Requested audio segment is empty after clamping: start={start_seconds}, end={end_seconds}"
+        )
+
+    sf.write(str(output_segment_path), waveform[start_index:end_index], sample_rate)
+    return output_segment_path
+
+def extract_video_sentiment_segment(
+        video_path: str | Path,
+        start_seconds: float,
+        end_seconds: float,
+) -> Path:
+    """Extract a time slice from a video and analyze the sentiment of that video segment.
+
+    .. note:: This is a placeholder for a future enhancement. Not yet implemented.
+    """
+    # TODO: Implement video segment sentiment analysis.
+    raise NotImplementedError("extract_video_sentiment_segment is not yet implemented.")
+
+
 def calculate_stretch_factor(video_path: str | Path, audio_path: str | Path) -> tuple[float, float, float]:
     """Return the source audio duration, video duration, and stretch factor.
 

@@ -62,6 +62,6 @@ def translate_segments(
 
 
 def translate_text_to_spanish(text: str) -> str:
-    """Backwards-compatible wrapper for English-to-Spanish translation."""
+    """Backwards-compatible wrapper for language to language translation."""
 
     return translate_text(text, source_language="en", target_language="es")
