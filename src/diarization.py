@@ -172,7 +172,7 @@ def diarize_and_extract_speakers(
             
     # 5. Update segment speaker_wav_path to point to speaker sample
     for idx, seg in enumerate(segments):
-        label = segment_labels[idx]
+        label = int(segment_labels[idx])
         seg["speaker_wav_path"] = speaker_samples[label]
         seg["speaker_id"] = label
         

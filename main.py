@@ -5,6 +5,38 @@ import json
 import sys
 from pathlib import Path
 
+# --- torchaudio monkeypatch for soundfile fallback (WDAC / torchcodec DLL block bypass) ---
+try:
+    import torchaudio
+    import soundfile as sf
+    import torch
+
+    def _soundfile_load(filepath, frame_offset=0, num_frames=-1, normalize=True, channels_first=True, **kwargs):
+        filepath_str = str(filepath)
+        start = frame_offset
+        frames = num_frames if num_frames > 0 else -1
+        data, samplerate = sf.read(filepath_str, start=start, frames=frames, dtype='float32')
+        tensor = torch.from_numpy(data)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0) if channels_first else tensor.unsqueeze(1)
+        else:
+            if channels_first:
+                tensor = tensor.transpose(0, 1)
+        return tensor, samplerate
+
+    def _soundfile_save(uri, src, sample_rate, channels_first=True, **kwargs):
+        data = src.detach().cpu().numpy()
+        if data.ndim == 2 and channels_first:
+            data = data.T
+        sf.write(str(uri), data, sample_rate)
+
+    # Apply monkeypatch
+    torchaudio.load = _soundfile_load
+    torchaudio.save = _soundfile_save
+    print("  [PATCH] Applied soundfile-based monkeypatch to torchaudio.load and torchaudio.save to bypass torchcodec DLL block.")
+except Exception as e:
+    print(f"  [WARN] Failed to apply soundfile monkeypatch to torchaudio: {e}")
+
 from src.media_utils import (
     ensure_ffmpeg_available,
     extract_audio_from_video,
@@ -223,6 +255,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Number of speakers to detect/cluster (if None, auto-detected).",
     )
     parser.add_argument(
+        "--narrator_speaker_ids",
+        default=None,
+        help="Comma-separated speaker IDs to treat as narrator/off-screen (no lip sync, e.g. '0' or '0,2').",
+    )
+    parser.add_argument(
+        "--auto_detect_narrator",
+        action="store_true",
+        help="Automatically detect off-screen narrator(s) based on face visibility during their segments.",
+    )
+    parser.add_argument(
         "--enable_color_matching",
         action="store_true",
         help="Match output video colors to the original input video.",
@@ -317,6 +359,122 @@ def _run_xtts_healthcheck(policy: str) -> int:
 
     print("\nHealth check complete.")
     return 0
+
+
+def _auto_detect_narrators(video_path: Path, segments: list[dict], threshold: float = 0.10) -> list[int]:
+    """
+    Sample frames from each speaker's active segments and check for face presence.
+    If a speaker's segments contain a face in less than the threshold percentage of
+    sampled frames, they are classified as an off-screen narrator.
+    """
+    import cv2
+    import os
+    
+    # Locate OpenCV's Haar Cascade XML for frontal face detection
+    cascade_dir = getattr(cv2, "data", None)
+    if cascade_dir and hasattr(cascade_dir, "haarcascades"):
+        cascade_path = os.path.join(cascade_dir.haarcascades, "haarcascade_frontalface_default.xml")
+    else:
+        cascade_path = "haarcascade_frontalface_default.xml"
+        
+    if not os.path.exists(cascade_path):
+        print(f"  [WARN] Face detector XML not found at {cascade_path}. Skipping narrator auto-detection.")
+        return []
+        
+    try:
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+    except Exception as e:
+        print(f"  [WARN] Failed to load CascadeClassifier: {e}. Skipping narrator auto-detection.")
+        return []
+        
+    # Group segments by speaker_id
+    speaker_segments = {}
+    for seg in segments:
+        spk_id = seg.get("speaker_id")
+        if spk_id is None:
+            continue
+        try:
+            spk_id = int(spk_id)
+        except (ValueError, TypeError):
+            continue
+        speaker_segments.setdefault(spk_id, []).append(seg)
+        
+    if not speaker_segments:
+        return []
+        
+    # Open the video to read frames
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"  [WARN] Failed to open video: {video_path} for narrator detection.")
+        return []
+        
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if fps <= 0 or total_frames <= 0:
+        cap.release()
+        return []
+        
+    print("\n[Narrator Detection] Running face visibility analysis on speaker segments...")
+    narrator_ids = []
+    
+    for spk_id, segs in speaker_segments.items():
+        # Collect target timestamps/frames to sample (e.g. 1 frame per second of speech)
+        sample_frames = []
+        for seg in segs:
+            start = float(seg.get("start", 0.0))
+            end = float(seg.get("end", 0.0))
+            # Sample every 1.0 seconds
+            t = start
+            while t <= end:
+                frame_idx = int(round(t * fps))
+                if 0 <= frame_idx < total_frames:
+                    sample_frames.append(frame_idx)
+                t += 1.0
+                
+        # Deduplicate and sort
+        sample_frames = sorted(list(set(sample_frames)))
+        if not sample_frames:
+            continue
+            
+        faces_detected_count = 0
+        total_samples = len(sample_frames)
+        
+        for frame_idx in sample_frames:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+                
+            # Resize frame to speed up face detection (e.g. max height/width 480)
+            h, w = frame.shape[:2]
+            scale = 1.0
+            if max(h, w) > 480:
+                scale = 480.0 / max(h, w)
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # Detect faces
+            faces = face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.2,
+                minNeighbors=4,
+                minSize=(25, 25)
+            )
+            if len(faces) > 0:
+                faces_detected_count += 1
+                
+        presence_ratio = faces_detected_count / total_samples if total_samples > 0 else 0.0
+        print(f"  Speaker {spk_id}: face visible in {faces_detected_count}/{total_samples} samples ({presence_ratio * 100:.1f}%)")
+        
+        # If face is visible in less than 10% of samples, classify as narrator
+        if presence_ratio < threshold:
+            narrator_ids.append(spk_id)
+            print(f"    -> Speaker {spk_id} classified as NARRATOR (off-screen)")
+        else:
+            print(f"    -> Speaker {spk_id} classified as ON-SCREEN speaker")
+            
+    cap.release()
+    return narrator_ids
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +660,30 @@ def main() -> int:
                     )
                     print(f"  [OK] Speaker diarization complete. {num_detected} speakers processed.")
 
+                # Save translated segments metadata for subsequent steps / resumes
+                class NumpyEncoder(json.JSONEncoder):
+                    def default(self, obj):
+                        try:
+                            import numpy as np
+                            if isinstance(obj, (np.integer, np.int64, np.int32)):
+                                return int(obj)
+                            if isinstance(obj, (np.floating, np.float64, np.float32)):
+                                return float(obj)
+                            if isinstance(obj, np.ndarray):
+                                return obj.tolist()
+                        except ImportError:
+                            pass
+                        return super(NumpyEncoder, self).default(obj)
+
+                segments_json_path = working_dir / "translated_segments.json"
+                serializable_segments = []
+                for seg in translated_segments:
+                    s_copy = seg.copy()
+                    if "speaker_wav_path" in s_copy and isinstance(s_copy["speaker_wav_path"], Path):
+                        s_copy["speaker_wav_path"] = str(s_copy["speaker_wav_path"])
+                    serializable_segments.append(s_copy)
+                segments_json_path.write_text(json.dumps(serializable_segments, cls=NumpyEncoder, indent=2, ensure_ascii=False), encoding="utf-8")
+
                 print("\n[5b/10] Synthesizing aligned TTS audio ...")
                 synthesize_aligned_audio_from_segments(
                     segments=translated_segments,
@@ -564,6 +746,46 @@ def main() -> int:
         print("[SKIP] Skipping Wav2Lip (resume).")
     else:
         print("\n[6/10] Running Wav2Lip lip-sync ...")
+        # Check for narrator isolation and exclusion intervals
+        exclude_intervals_path = None
+        if args.diarize_speakers and (args.narrator_speaker_ids or args.auto_detect_narrator):
+            segments_json_path = working_dir / "translated_segments.json"
+            if segments_json_path.exists():
+                try:
+                    with open(segments_json_path, "r", encoding="utf-8") as f:
+                        loaded_segments = json.load(f)
+
+                    narrator_ids = []
+                    if args.narrator_speaker_ids:
+                        narrator_ids.extend([
+                            int(x.strip())
+                            for x in args.narrator_speaker_ids.split(",")
+                            if x.strip().lstrip("-").isdigit()
+                        ])
+
+                    if args.auto_detect_narrator:
+                        detected_ids = _auto_detect_narrators(input_video, loaded_segments, threshold=0.10)
+                        for d_id in detected_ids:
+                            if d_id not in narrator_ids:
+                                narrator_ids.append(d_id)
+
+                    if narrator_ids:
+                        print(f"  Excluding speaker(s) {narrator_ids} (narrator) from lip-syncing.")
+                        exclude_intervals = []
+                        for seg in loaded_segments:
+                            spk_id = seg.get("speaker_id")
+                            if spk_id is not None and int(spk_id) in narrator_ids:
+                                exclude_intervals.append([float(seg.get("start", 0.0)), float(seg.get("end", 0.0))])
+
+                        if exclude_intervals:
+                            exclude_intervals_path = working_dir / "exclude_intervals.json"
+                            exclude_intervals_path.write_text(json.dumps(exclude_intervals, indent=2), encoding="utf-8")
+                            print(f"  Saved exclusion intervals to: {exclude_intervals_path.name}")
+                except Exception as e:
+                    print(f"  [WARN] Failed to process narrator isolation: {e}")
+            else:
+                print("  [WARN] translated_segments.json not found. Cannot perform narrator isolation.")
+
         run_wav2lip_inference(
             checkpoint_path=args.checkpoint_path,
             face_video_path=input_video,
@@ -578,6 +800,7 @@ def main() -> int:
             crop=tuple(args.wav2lip_crop),
             rotate=args.wav2lip_rotate,
             box=tuple(args.wav2lip_box) if args.wav2lip_box is not None else None,
+            exclude_intervals_path=exclude_intervals_path,
         )
         _mark_step_done(state_path, state, "wav2lip")
 

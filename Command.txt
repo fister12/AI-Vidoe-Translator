@@ -25,9 +25,23 @@ python main.py --input_video ".\input\my_english_video.mp4" --output_video ".\ou
 // Resume a failed run (skips completed steps)
 python main.py --input_video ".\input\my_english_video.mp4" --output_video ".\output\final_output.mp4" --checkpoint_path ".\models\wav2lip_gan.pth" --audio_language auto --output_language japanese --resume
 
-// Add --enhance for GFPGAN post-processing
+// Run with Speaker Diarization (cloning separate voices for different speakers)
+python main.py --input_video ".\input\my_english_video.mp4" --output_video ".\output\final_output.mp4" --checkpoint_path ".\models\wav2lip_gan.pth" --audio_language auto --output_language spanish --diarize_speakers
+
+// Run with Speaker Diarization and Narrator Isolation (exclude narrator speakers from lip sync)
+python main.py --input_video ".\input\my_english_video.mp4" --output_video ".\output\final_output.mp4" --checkpoint_path ".\models\wav2lip_gan.pth" --audio_language auto --output_language spanish --diarize_speakers --narrator_speaker_ids 0,2
+
+// Run with Speaker Diarization and Auto Narrator Detection (skips lip sync for speakers rarely seen on screen)
+python main.py --input_video ".\input\my_english_video.mp4" --output_video ".\output\final_output.mp4" --checkpoint_path ".\models\wav2lip_gan.pth" --audio_language auto --output_language spanish --diarize_speakers --auto_detect_narrator
+
+// Flag summary:
+// Add --enhance for GFPGAN face post-processing
 // Add --enable_preprocessing for audio cleanup before transcription
 // Add --optimize_segments for smarter segment handling
 // Add --enable_advanced_postprocessing for optical flow smoothing
 // Add --enable_color_matching to preserve original video colors
 // Add --resume to continue from where a previous run left off
+// Add --diarize_speakers to clone separate speaker voices
+// Add --num_speakers <N> to specify the exact speaker count
+// Add --narrator_speaker_ids <ids> to exclude off-screen speakers from lip sync
+// Add --auto_detect_narrator to automatically isolate and exclude off-screen narrators

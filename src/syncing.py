@@ -27,6 +27,7 @@ def run_wav2lip_inference(
     crop: tuple[int, int, int, int] = (0, -1, 0, -1),
     rotate: bool = False,
     box: tuple[int, int, int, int] | None = None,
+    exclude_intervals_path: str | Path | None = None,
 ) -> Path:
     """Run Wav2Lip as a subprocess and stream its output with progress feedback."""
 
@@ -107,6 +108,11 @@ def run_wav2lip_inference(
             str(box[1]),
             str(box[2]),
             str(box[3]),
+        ])
+    if exclude_intervals_path is not None:
+        command.extend([
+            "--exclude_intervals",
+            str(exclude_intervals_path),
         ])
 
     process = subprocess.Popen(

@@ -11,29 +11,33 @@ At a high level, the system operates as a sequential pipeline consisting of dist
 ```mermaid
 flowchart TD
     A[Input Video] --> B(Extraction Phase)
-    B --> |Audio Data| C[Transcription \n Whisper]
-    B --> |Video Details| I
+    B --> |Raw Audio| PRE[Audio Preprocessing \n optional]
+    PRE --> |Clean Audio| C[Transcription \n Whisper]
+    B --> |Video Stream| F
     
-    C --> |Transcribed Segments| D[Translation \n googletrans/deep-translator]
+    C --> |Raw Segments| OPT[Segment Optimization \n optional]
+    OPT --> |Optimized Segments| D[Translation \n googletrans/deep-translator]
     
-    D --> |Target Language Text| E[Text-To-Speech \n XTTS / gTTS]
-    B --> |Source Speaker Wav slices| E
+    D --> |Translated Segments| DIAR[Speaker Diarization \n optional]
+    DIAR --> |Speaker Voice References| E[Text-To-Speech \n XTTS / gTTS]
+    B --> |Source Speaker WAV Sample| E
     
-    E --> |Synthesized Target Audio| F[Lip Sync \n Wav2Lip Wrapper]
-    A --> |Target Video| F
+    E --> |Synthesized Target Audio| F[Lip Sync \n Wav2Lip Wrapper \n with Narrator exclusion]
     
-    F --> |Lip-synced Video Frame| G[Facial Enhancement \n GFPGAN \n Optional]
+    F --> |Lip-synced Video| G[Facial Enhancement \n GFPGAN \n optional]
     
-    G --> H[FFmpeg Post-Processing \n Denoise, Color, Sharpen]
+    G --> H[FFmpeg Post-Processing \n basic or optical flow]
     
-    H --> I[Final Muxing]
+    H --> COLOR[Color Matching \n optional]
+    
+    COLOR --> I[Final Muxing]
     E --> |Target Audio| I
     
     I --> J[Output Translated Video]
     
     %% Styling
     classDef process fill:#f9f,stroke:#333,stroke-width:2px;
-    class C,D,E,F,G,H process;
+    class PRE,C,OPT,D,DIAR,E,F,G,H,COLOR process;
 ```
 
 ### High-Level Workflow
@@ -59,20 +63,34 @@ classDiagram
     }
     
     class MediaUtils {
-        +extract_audio()
-        +mux_video_and_audio()
+        +ensure_ffmpeg_available()
+        +ensure_cuda_available()
+        +resolve_runtime_device()
+        +get_media_duration()
+        +extract_audio_from_video()
+        +extract_voice_sample()
+        +extract_audio_segment()
+        +stretch_audio_to_video_duration()
         +pad_or_trim_audio_to_video_duration()
-        +ffmpeg_postprocess()
+        +postprocess_video_quality()
+        +mux_video_with_audio()
+    }
+    
+    class Preprocessing {
+        +preprocess_audio_for_transcription()
     }
     
     class Transcription {
         +transcribe_english_audio()
-        +transcribe_segments()
     }
     
     class Translation {
         +translate_text()
         +translate_segments()
+    }
+    
+    class Diarization {
+        +diarize_and_extract_speakers()
     }
     
     class TTS {
@@ -81,36 +99,61 @@ classDiagram
     }
     
     class Syncing {
-        +run_wav2lip()
+        +run_wav2lip_inference()
     }
     
     class Enhancement {
-        +enhance_faces_gfpgan()
+        +enhance_faces_in_video()
+    }
+    
+    class Postprocessing {
+        +advanced_postprocess_with_optical_flow()
+        +apply_histogram_matching()
+        +remove_temporal_jitter()
+        +enhance_contrast_adaptive()
+        +verify_lip_sync_accuracy()
+    }
+    
+    class QualityAnalysis {
+        +optimize_transcription_segments()
+        +analyze_segment_pronunciation_difficulty()
+        +estimate_optimal_tts_parameters()
+        +VideoQualityScorer.analyze_video()
+        +estimate_sync_quality_from_segments()
     }
     
     class Languages {
-        +normalize_language()
-        +get_supported_languages()
+        +normalize_target_language()
+        +format_supported_target_languages()
     }
 
     MainScript --> MediaUtils : File Orchestration
+    MainScript --> Preprocessing : Audio cleanup
     MainScript --> Transcription : Whisper Models
-    MainScript --> Translation : googletrans/deep-translator
+    MainScript --> QualityAnalysis : Segment optimization
+    MainScript --> Translation : Translation APIs
+    MainScript --> Diarization : Speaker clustering
     MainScript --> TTS : XTTS/gTTS
-    MainScript --> Syncing : Subprocess wrapper
-    MainScript --> Enhancement : Shim injection & import
-    MainScript --> Languages : Target language validation
+    MainScript --> Syncing : Wav2Lip subprocess
+    MainScript --> Enhancement : Face enhancement
+    MainScript --> Postprocessing : Optical flow & color matching
+    MainScript --> Languages : Language validation
 ```
 
 ### Core Components Details
 
-- **`src.media_utils`**: Heavily dependent on `subprocess` scaling the command line API of `ffmpeg`. Responsible for length adjustment (e.g., `rate = source_audio_duration / target_video_duration`). Contains the post-process execution.
-- **`src.transcription`**: Calls and loads Whisper models. Processes raw input paths and abstracts ASR API responses into iterable dictionaries representing line-by-line segments with `start` and `end` timings.
-- **`src.translation`**: Handles external network requests to translation APIs. Supports fallback stacks relying on `googletrans` or `deep-translator`.
-- **`src.tts`**: Employs backend exception handling structure (`XTTSUnavailableError`, `XTTSRuntimeSynthesisError`, etc.). Employs a `--tts_backend_policy` to distinguish between strict cloning pipelines vs. simple gTTS fallback if users don't have Coqui installed on newer platforms or Windows systems failing C++ tooling. 
-- **`src.syncing`**: Wraps the `Wav2Lip/inference.py` environment. Monitors subprocess stdout via `tqdm` to capture pipeline progression, outputting temp video files. Uses explicit `x264` settings (`-preset slow -crf 16`) for better export quality than legacy Wav2Lip.
-- **`src.enhancement`**: Handles conditional imports and Torch monkeypatching (such as `torchvision.transforms.functional_tensor`) required for GFPGAN loading on newer PyTorch versions.
-- **`src.languages`**: Small helper dictionary and normalization script ensuring flags like `--target_language fr` equates perfectly for translation endpoints and internal prompts as `french`.
+- **`src.media_utils`**: Wraps FFmpeg command-line interface. Handles extracting audio tracks, time-slicing WAV files, stretching audio, duration alignment (trim/pad), and video-audio muxing.
+- **`src.preprocessing`**: Provides speech audio preprocessing (spectral denoising, Butterworth bandpass filtering, dynamic range compression, LUFS loudness normalization) to maximize transcription accuracy.
+- **`src.transcription`**: Interfaces with OpenAI's Whisper models to transcribe input audio and return segment dictionaries with timestamp data.
+- **`src.quality_analysis`**: Implements segment optimization (filters low-confidence, splits long, merges short segments) and handles video/sync quality scoring.
+- **`src.translation`**: Handles communication with Google Translate endpoints using `googletrans` and a backup deep-translator framework, with segment alignment tracking.
+- **`src.diarization`**: Uses XTTS voice latents to cluster speakers, enabling speaker voice cloning for multi-speaker dialogues.
+- **`src.tts`**: Integrates Coqui XTTS v2 with gTTS fallback. Synthesizes aligned speech using time-stretching and padding/offset calculations.
+- **`src.syncing`**: Wraps the Wav2Lip system as a progress-tracked subprocess. Handles custom arguments including face crop, bounding box, rotation, and narrator exclusion intervals.
+- **`src.enhancement`**: Employs GFPGAN to enhance and restore blurry faces in Wav2Lip output frames.
+- **`src.postprocessing`**: Applies basic FFmpeg postprocessing or advanced optical flow temporal smoothing, LAB color space histogram matching, temporal jitter removal, and CLAHE adaptive contrast.
+- **`src.languages`**: Normalizes and validates user-specified target language codes or names against supported codes.
+
 
 ---
 

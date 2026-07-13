@@ -6,31 +6,44 @@
 Input Video
     |
     v
-[1] Audio Extraction ----------> [2] Transcription (Whisper)
+[1] Audio Extraction ----------> [2] Audio Preprocessing (optional)
     |                                    |
     |                                    v
-    |                              [3] Translation
+    |                            [3] Transcription (Whisper)
+    |                                    |
+    |                                    v
+    |                            [3b] Segment Optimization (optional)
+    |                                    |
+    |                                    v
+    |                            [4] Translation
     |                                    |
     v                                    v
-[4] Voice Sample          [5] TTS Synthesis (XTTS / gTTS)
-    |                                    |
+[5] Voice Sample & -------> [5b] Speaker Diarization (optional)
+    Speaker references                   |
     |                                    v
-    +---------> [6] Wav2Lip (Lip-sync) <+
-                        |
-                        v
-              [7] GFPGAN Enhancement (optional)
-                        |
-                        v
-              [8] Post-Processing (denoise, sharpen, color)
-                        |
-                        v
-              [9] Audio + Video Mux
-                        |
-                        v
-                  Output Video
+    +--------------------------> [5c] TTS Synthesis (XTTS / gTTS)
+                                         |
+                                         v
+                                 [6] Wav2Lip Lip-sync (with Narrator exclusion)
+                                         |
+                                         v
+                                 [7] GFPGAN Enhancement (optional)
+                                         |
+                                         v
+                                 [8] Post-Processing (basic or optical flow)
+                                         |
+                                         v
+                                 [9] Color Matching (optional)
+                                         |
+                                         v
+                                 [10] Audio + Video Mux
+                                         |
+                                         v
+                                   Output Video
 ```
 
-The pipeline supports checkpoint/resume -- completed steps are saved to `temp/pipeline_state.json` and skipped on re-run.
+The pipeline supports checkpoint/resume -- completed steps are saved to `temp/.pipeline_state.json` and skipped on re-run.
+
 
 ---
 
@@ -44,14 +57,19 @@ The pipeline supports checkpoint/resume -- completed steps are saved to `temp/pi
 
 ### `src/media_utils.py` -- Media Utilities
 - FFmpeg availability check and CUDA detection
-- Audio extraction from video (MoviePy)
-- Voice sample extraction for speaker cloning
-- Audio stretching/padding to match video duration
-- FFmpeg-based post-processing (hqdn3d denoise, unsharp sharpen, eq color)
-- Video+audio muxing with stream-copy fallback
+- Audio extraction from video (`extract_audio_from_video()`)
+- Voice sample extraction for speaker cloning (`extract_voice_sample()`)
+- Audio segment time-slice extraction (`extract_audio_segment()`)
+- Audio stretching/padding (`stretch_audio_to_video_duration()`, `pad_or_trim_audio_to_video_duration()`)
+- FFmpeg-based basic post-processing (`postprocess_video_quality()`)
+- Video+audio muxing (`mux_video_with_audio()`)
+
+### `src/diarization.py` -- Speaker Diarization
+- Performs speaker clustering using segment conditioning latents from the XTTS model (`diarize_and_extract_speakers()`)
+- Assigns unique speaker IDs and groups voice samples to clone multi-speaker conversations
 
 ### `src/transcription.py` -- Whisper Wrapper
-- Loads Whisper model and transcribes audio
+- Loads Whisper model and transcribes audio (`transcribe_english_audio()`)
 - Returns text, segments (with timestamps), and detected language
 - Supports all Whisper model sizes (tiny through large)
 
@@ -64,22 +82,22 @@ The pipeline supports checkpoint/resume -- completed steps are saved to `temp/pi
 - Custom exceptions: `XTTSUnavailableError`, `XTTSRuntimeSynthesisError`, `GTTSError`
 - Model caching via `_CachedXTTSModel` -- loads XTTS once, reuses across segments
 - Policy-driven TTS: `strict_clone`, `fallback_allowed`, `fallback_only`
-- Segment-aligned synthesis with time-stretching and original-timestamp placement
+- Segment-aligned synthesis with time-stretching and original-timestamp placement (`synthesize_aligned_audio_from_segments()`)
 - Peak normalization to prevent clipping
 
 ### `src/syncing.py` -- Wav2Lip Wrapper
-- Launches Wav2Lip as a subprocess
+- Launches Wav2Lip as a subprocess (`run_wav2lip_inference()`)
 - Parses stdout for percentage progress with tqdm display
 - Validates input files before launching
-- Uses x264 with explicit quality settings
+- Integrates exclusion intervals (`exclude_intervals.json`) to skip off-screen narrators
 
 ### `src/enhancement.py` -- Face Enhancement
 - Torchvision compatibility shim for `functional_tensor` module rename
 - GFPGAN initialization with auto-download of model weights
-- Frame-by-frame face enhancement with fallback to original
+- Frame-by-frame face enhancement with fallback to original (`enhance_faces_in_video()`)
 
 ### `src/languages.py` -- Language Support
-- 16 supported target languages
+- 17 supported target languages
 - Extensive alias dictionary (handles "french", "fr", "francais", etc.)
 - `normalize_target_language()` with validation
 
@@ -89,20 +107,21 @@ The pipeline supports checkpoint/resume -- completed steps are saved to `temp/pi
 - Butterworth bandpass filtering (80Hz-15kHz for speech)
 - Dynamic range compression with envelope follower
 - `preprocess_audio_for_transcription()` orchestrates all steps
-- Silence detection and audio statistics utilities
 
 ### `src/postprocessing.py` -- Advanced Post-Processing
-- FFmpeg-based optical flow smoothing (minterpolate + hqdn3d + unsharp + eq)
-- Histogram-based color matching (LAB color space transfer)
-- Temporal jitter removal via median filtering
-- CLAHE adaptive contrast enhancement
-- Lip-sync accuracy verification
+- FFmpeg-based optical flow smoothing (`advanced_postprocess_with_optical_flow()`)
+- Histogram-based color matching in LAB color space (`apply_histogram_matching()`)
+- Temporal jitter removal via median filtering (`remove_temporal_jitter()`)
+- CLAHE adaptive contrast enhancement (`enhance_contrast_adaptive()`)
+- Lip-sync accuracy verification via mouth motion (`verify_lip_sync_accuracy()`)
 
-### `src/quality_analysis.py` -- Quality Analysis
-- Segment optimization: confidence filtering, long-segment splitting, short-segment merging
-- Pronunciation difficulty analysis (textstat + epitran, with graceful fallback)
-- `VideoQualityScorer`: sharpness (Laplacian variance), contrast (entropy), lighting analysis
-- Sync quality estimation from segment characteristics
+### `src/quality_analysis.py` -- Quality Analysis & Segment Optimization
+- Segment optimization: confidence filtering, long-segment splitting, short-segment merging (`optimize_transcription_segments()`)
+- Pronunciation difficulty analysis (`analyze_segment_pronunciation_difficulty()`)
+- Optimal TTS parameter estimation (`estimate_optimal_tts_parameters()`)
+- Comprehensive video quality assessment (`VideoQualityScorer.analyze_video()`)
+- Sync quality estimation from segment characteristics (`estimate_sync_quality_from_segments()`)
+
 
 ---
 
@@ -173,6 +192,32 @@ print(f"Sharpness: {quality['sharpness']['mean']:.1f}/100")
 sync = estimate_sync_quality_from_segments(segments, target_language="es")
 print(f"Sync difficulty: {sync['sync_difficulty']}")
 ```
+
+### Adding Speaker Diarization & Narrator Isolation
+
+```python
+from src.diarization import diarize_and_extract_speakers
+
+# Perform speaker diarization on translated segments:
+num_speakers = diarize_and_extract_speakers(
+    segments=translated_segments,
+    working_dir=working_dir,
+    tts_model_name=args.tts_model_name,
+    device=device,
+    num_speakers=args.num_speakers,
+)
+
+# In run_wav2lip_inference(), pass exclude_intervals_path to skip lip-syncing for narrators:
+from src.syncing import run_wav2lip_inference
+run_wav2lip_inference(
+    checkpoint_path=args.checkpoint_path,
+    face_video_path=input_video,
+    audio_path=translated_audio_synced_path,
+    output_video_path=wav2lip_output_path,
+    exclude_intervals_path=exclude_intervals_path,
+)
+```
+
 
 ---
 

@@ -36,12 +36,14 @@ pip-wheel-metadata/
 temp/
 
 # Project runtime outputs
-output/
+/output/*
+!/output/.gitkeep
 Wav2Lip/results/
 Wav2Lip/temp/
 
 # Input media (usually large and local)
-input/
+/input/*
+!/input/.gitkeep
 
 # Model artifacts (do not track)
 /models/
@@ -53,3 +55,7 @@ input/
 *.safetensors
 *.onnx
 *.bin
+
+# Colab packaging
+/colab_upload/
+/colab_upload.zip

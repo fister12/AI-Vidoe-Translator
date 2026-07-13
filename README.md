@@ -58,8 +58,9 @@ python main.py \
 
 | Argument | Default | Description |
 |---|---|---|
-| `--audio_language` | `auto` | Source language code or `auto` for detection |
-| `--output_language` | `es` | Target language code or name |
+| `--audio_language` | `None` (falls back to `en`) | Source language code or `auto` for detection |
+| `--output_language` | `None` (falls back to `es`) | Target language code or name |
+
 
 ### TTS
 
@@ -68,6 +69,16 @@ python main.py \
 | `--tts_backend_policy` | `strict_clone` | `strict_clone`, `fallback_allowed`, or `fallback_only` |
 | `--tts_model_name` | `tts_models/multilingual/multi-dataset/xtts_v2` | Coqui XTTS model |
 | `--extract_sample_seconds` | `10.0` | Voice sample length for cloning |
+
+### Speaker Diarization & Narrator Isolation
+
+| Argument | Default | Description |
+|---|---|---|
+| `--diarize_speakers` | off | Enable speaker diarization (clustering) to clone and apply different speaker voices |
+| `--num_speakers` | `None` | Number of speakers to detect/cluster (if None, auto-detected) |
+| `--narrator_speaker_ids` | `None` | Comma-separated speaker IDs to treat as narrator/off-screen (no lip sync, e.g., `0` or `0,2`) |
+| `--auto_detect_narrator` | off | Automatically detect off-screen narrator(s) based on face visibility |
+
 
 ### Timing & Device
 
@@ -104,18 +115,24 @@ python main.py \
 | `--wav2lip_face_det_batch_size` | `16` | Face detection batch size |
 | `--wav2lip_batch_size` | `128` | Inference batch size |
 | `--wav2lip_rotate` | off | Rotate frames 90deg for phone videos |
+| `--wav2lip_crop` | `0 -1 0 -1` | Optional crop region passed to Wav2Lip (top bottom left right) |
+| `--wav2lip_box` | `None` | Optional fixed face box for Wav2Lip (top bottom left right) |
+
 
 ### Utilities
 
-| Argument | Description |
-|---|---|
-| `--list_languages` | Show supported target languages |
-| `--xtts_healthcheck_only` | Check XTTS availability without running pipeline |
-| `--resume` | Resume from last checkpoint |
+| Argument | Default | Description |
+|---|---|---|
+| `--list_languages` | off | Show supported target languages |
+| `--xtts_healthcheck_only` | off | Check XTTS availability without running pipeline |
+| `--resume` | off | Resume from last checkpoint |
+| `--translated_text_path` | `None` | Optional path to save the translated segment text file |
+
 
 ## Supported Languages
 
-Arabic, Chinese (Simplified), Dutch, English, French, German, Greek, Hindi, Italian, Japanese, Korean, Polish, Portuguese, Russian, Spanish, Turkish.
+Arabic, Chinese (Simplified), Czech, Dutch, English, French, German, Hindi, Hungarian, Italian, Japanese, Korean, Polish, Portuguese, Russian, Spanish, Turkish.
+
 
 ## Example Commands
 
@@ -149,6 +166,16 @@ python main.py \
   --audio_language auto \
   --output_language japanese \
   --resume
+
+# Run with speaker diarization and auto narrator detection
+python main.py \
+  --input_video input.mp4 \
+  --output_video output.mp4 \
+  --checkpoint_path models/wav2lip_gan.pth \
+  --audio_language auto \
+  --output_language french \
+  --diarize_speakers \
+  --auto_detect_narrator
 
 # XTTS healthcheck
 python main.py --xtts_healthcheck_only --tts_backend_policy strict_clone
